@@ -424,7 +424,7 @@ def gera_troca( request ):
             ) (
                 SELECT 
                     seq_tenant, seq_pedido_cli, cod_pessoa, nome_pessoa, cnpj_cpf, endereco, numero_endereco, 
-                    bairro_endereco, cep_endereco, cidade_endereco, contato_pessoa, 'T' , observacao, 'P', 
+                    bairro_endereco, cep_endereco, cidade_endereco, contato_pessoa, 'T' , observacao, 'EM ABERTO', 
                     now()
                 FROM
                     ek_entrega
@@ -446,7 +446,7 @@ def gera_troca( request ):
                     ) (
                         SELECT
                             seq_tenant, %s ,  seq_item_pedido_cli, cod_produto, descricao_produto, 
-                            quantidade_produto, null, null, foto_item, null, '', observacao_item, 
+                            quantidade_produto, null, null, foto_item, null, 'P', observacao_item, 
                             now()
                         FROM ek_item_entrega
                         WHERE ek_item_entrega.seq_entrega = %s
@@ -495,7 +495,7 @@ def gera_troca( request ):
             ) (
                 SELECT 
                     seq_tenant, seq_pedido_cli, cod_pessoa, nome_pessoa, cnpj_cpf, endereco, numero_endereco, 
-                    bairro_endereco, cep_endereco, cidade_endereco, contato_pessoa, 'R' , observacao, 'P', 
+                    bairro_endereco, cep_endereco, cidade_endereco, contato_pessoa, 'R' , observacao, 'EM ABERTO', 
                     now()
                 FROM
                     ek_entrega
@@ -517,7 +517,7 @@ def gera_troca( request ):
                     ) (
                         SELECT
                             seq_tenant, %s ,  seq_item_pedido_cli, cod_produto, descricao_produto, 
-                            quantidade_produto, null, null, foto_item, null, '', observacao_item, 
+                            quantidade_produto, null, null, foto_item, null, 'P', observacao_item, 
                             now()
                         FROM ek_item_entrega
                         WHERE ek_item_entrega.seq_entrega = %s
@@ -548,6 +548,44 @@ def gera_troca( request ):
                 "causa": "Houve um erro ao inserir o recolhimento!"
             }
         }
+
+@api_entregas.delete("entregas/")
+def delete_entrega( request ):
+    cursor = connection.cursor()
+
+    try:
+        cursor.execute("""
+            DELETE FROM ek_item_entrega WHERE seq_entrega = %s
+        """,[
+            request.GET["sequencial_entrega"]
+        ])
+    except:
+        return {
+            "Status": 400,
+            "Erro": {
+                "causa": "Houve um erro ao excluir o item da entrega"
+            }
+        }
+
+    try:
+        cursor.execute("""
+            DELETE FROM ek_entrega WHERE seq_entrega = %s
+        """,[
+            request.GET["sequencial_entrega"]
+        ])
+    except:
+        return {
+            "Status": 400,
+            "Erro": {
+                "causa": "Houve um erro ao excluir a entrega"
+            }
+        }
+    
+    return {
+        "Status": 200,
+        "Mensagem": "Registro excluido com sucesso!"
+    }
+
 
 # ----------------------------------- Entregas Modal Pendentes -----------------------------------
 
@@ -776,6 +814,15 @@ def post_entregas_modal( request ):
                         }
                     }
 
+                # Manipulação do status da entrega -> 
+
+                cursor.execute("""
+                    SELECT seq_entrega FROM ek_item_entrega WHERE ek_item_entrega.seq_item_entrega = %s
+                """,[
+                    numeroRowEntregador
+                ])
+                sequencial_entrega = cursor.fetchall()
+
                 cursor.execute("""
                     SELECT 
                         (CASE WHEN
@@ -785,16 +832,19 @@ def post_entregas_modal( request ):
                                 ( SELECT seq_item_entrega FROM ek_item_entrega WHERE ek_item_entrega.seq_entrega = %s AND ek_item_entrega.status_entrega_item != 'C' )))
                             THEN 'FINALIZADO' else 'EM ABERTO' 
                         END ) as status
-                """)
+                """,[
+                    sequencial_entrega[0][0] , sequencial_entrega[0][0]
+                ])
                 status_entrega = cursor.fetchall()
 
                 try:
                     cursor.execute("""
                         UPDATE ek_entrega
                         SET status_entrega = %s
-                        WHERE ek_entrega.seq_entrega IN ( SELECT seq_entrega FROM ek_item_entrega WHERE ek_item_entrega.seq_item_entrega = %s )
+                        WHERE ek_entrega.seq_entrega = %s
                     """,[
-                        status_entrega[0][0], numeroRowEntregador
+                        status_entrega[0][0],
+                        sequencial_entrega[0][0]
                     ])
                 except:
                     traceback.print_exc()
@@ -807,6 +857,7 @@ def post_entregas_modal( request ):
 
         return {
             "Status": 200,
+            "TotalInserido": len(camposEntregadores),
             "Mensagem": "Entrega agendada com sucesso!"
         }
     else:
@@ -830,6 +881,51 @@ def delete_item_entregas( request ):
             request.GET["sequencial"]
         ])
 
+        cursor.execute("""
+            SELECT seq_entrega FROM ek_item_entrega WHERE ek_item_entrega.seq_item_entrega = %s
+        """,[
+            request.GET["sequencial"]
+        ])
+        sequencial_entrega = cursor.fetchall()
+
+        cursor.execute("""
+            SELECT 
+                CASE 
+                    WHEN (SELECT COUNT(*) FROM ek_item_entrega WHERE seq_entrega = %s) = 
+                        (SELECT COUNT(*) FROM ek_item_entrega WHERE seq_entrega = %s AND status_entrega_item = 'C')
+                    THEN 'CANCELADO'
+                    WHEN (SELECT COUNT(*) FROM ek_item_entrega WHERE seq_entrega = %s AND status_entrega_item != 'C') = 
+                        (SELECT COUNT(*) FROM ek_entregador_item_entrega WHERE seq_item_entrega IN 
+                            (SELECT seq_item_entrega FROM ek_item_entrega WHERE seq_entrega = %s AND status_entrega_item != 'C'))
+                    THEN 'FINALIZADO'
+                    ELSE 'EM ABERTO'
+                END AS status
+        """,[
+            sequencial_entrega[0][0] , sequencial_entrega[0][0],
+            sequencial_entrega[0][0] , sequencial_entrega[0][0],
+        ])
+        status_entrega = cursor.fetchall()
+        
+
+        if status_entrega:
+            try:
+                cursor.execute("""
+                    UPDATE ek_entrega
+                    SET status_entrega = %s
+                    WHERE ek_entrega.seq_entrega = %s
+                """,[
+                    status_entrega[0][0],
+                    sequencial_entrega[0][0]
+                ])
+            except:
+                traceback.print_exc()
+                return {
+                    "Status": 400,
+                    "Erro": {
+                        "causa": "Houve um erro ao atualizar o status da entrega!"
+                    }
+                }
+
         return {
             "Status": 200,
             "Mensagem": "Item excluído com sucesso!"
@@ -842,7 +938,6 @@ def delete_item_entregas( request ):
                 "causa": "Houve um erro na exclusão do item!"
             }
         }
-
 
 # ----------------------------------- Entregas Modal Agendados -----------------------------------
 
@@ -893,43 +988,10 @@ def put_modal_agendados( request ):
             parametros.get("sequencial_entrega")
         ])
 
-
-
-        cursor.execute("""
-        SELECT 
-            (CASE WHEN
-                (SELECT (SELECT count(*) FROM ek_item_entrega WHERE ek_item_entrega.seq_entrega = 2 AND ek_item_entrega.status_entrega_item != 'C' )
-                    =
-                (SELECT count(*) FROM ek_entregador_item_entrega WHERE seq_item_entrega  IN 
-                    ( SELECT seq_item_entrega FROM ek_item_entrega WHERE ek_item_entrega.seq_entrega = 2 AND ek_item_entrega.status_entrega_item != 'C' )))
-                THEN 'FINALIZADO' else 'EM ABERTO' 
-            END ) as status
-    """)
-        status_entrega = cursor.fetchall()
-
-        try:
-            cursor.execute("""
-                UPDATE ek_entrega
-                SET status_entrega = %s
-                WHERE ek_entrega.seq_entrega IN 
-                    (SELECT seq_entrega FROM ek_item_entrega WHERE ek_item_entrega.seq_item_entrega IN
-	                    (SELECT seq_item_entrega FROM ek_entregador_item_entrega WHERE seq_entregador_item_entrega = %s))
-            """,[
-                status_entrega, 
-                parametros.get("sequencial_entrega")
-            ])
-
-            return {
-                "Status": 200,
-                "Mensagem": "Item da entrega atualizado com sucesso!"
-            }
-        except:
-            return {
-                "Status": 400,
-                "Erro": {
-                    "causa": "Houve um erro ao atualizar o status da entrega!"
-                }
-            }
+        return {
+            "Status": 200,
+            "Mensagem": "Item atualizado com sucesso!"
+        }
 
     except:
         traceback.print_exc()
@@ -944,7 +1006,6 @@ def put_modal_agendados( request ):
 def delete_modal_agendados( request ):
     cursor = connection.cursor()
 
-
     try:
         cursor.execute("""
             DELETE FROM ek_entregador_item_entrega
@@ -954,7 +1015,51 @@ def delete_modal_agendados( request ):
             request.GET["sequencial"]
         ])
         sequencial_item = cursor.fetchall()
-        print( sequencial_item )
+
+        cursor.execute("""
+            UPDATE ek_item_entrega SET status_entrega_item = 'P' WHERE ek_item_entrega.seq_item_entrega = %s
+        """,[
+            sequencial_item[0][0]
+        ])
+
+        cursor.execute("""
+            SELECT seq_entrega FROM ek_item_entrega WHERE seq_item_entrega = %s
+        """,[
+            sequencial_item[0][0]
+        ])
+        sequencial_entrega = cursor.fetchall()
+
+        cursor.execute("""
+            SELECT 
+                (CASE WHEN
+                    (SELECT (SELECT count(*) FROM ek_item_entrega WHERE ek_item_entrega.seq_entrega = %s AND ek_item_entrega.status_entrega_item != 'C' )
+                        =
+                    (SELECT count(*) FROM ek_entregador_item_entrega WHERE seq_item_entrega  IN 
+                        ( SELECT seq_item_entrega FROM ek_item_entrega WHERE ek_item_entrega.seq_entrega = %s AND ek_item_entrega.status_entrega_item != 'C' )))
+                    THEN 'FINALIZADO' else 'EM ABERTO' 
+                END ) as status
+        """,[
+            sequencial_entrega[0][0] , sequencial_entrega[0][0]
+        ])
+        status_entrega = cursor.fetchall()
+
+        try:
+            cursor.execute("""
+                UPDATE ek_entrega
+                SET status_entrega = %s
+                WHERE ek_entrega.seq_entrega = %s
+            """,[
+                status_entrega[0][0],
+                sequencial_entrega[0][0]
+            ])
+        except:
+            traceback.print_exc()
+            return {
+                "Status": 400,
+                "Erro": {
+                    "causa": "Houve um erro ao atualizar o status da entrega!"
+                }
+            }
 
         if sequencial_item:
             cursor.execute("""
@@ -1172,3 +1277,4 @@ def getEntregaModal( request ):
                 "causa": "Houve um erro ao buscar os dados!"
             }
         }
+
