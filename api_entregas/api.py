@@ -5,6 +5,31 @@ import traceback
 
 api_entregas = Router()
 
+# ------------------------------------------- LOGIN -------------------------------------------
+@api_entregas.get("login/")
+def get_login( request ):
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        SELECT json_agg(x.*)
+        FROM (
+            SELECT 
+                ek_tenant.seq_tenant , login , type_user , seq_entregador , nome_empresa
+            FROM ek_tenant_user INNER JOIN ek_tenant 
+                ON ek_tenant_user.seq_tenant = ek_tenant.seq_tenant
+            WHERE login = %s AND password = %s
+        ) as x
+    """,[
+        request.GET["usuario"] , request.GET["senha"]
+    ])
+    objetoUsuario = cursor.fetchall()
+
+    if objetoUsuario:
+        return {
+            "Status": 200,
+            "Usuario": objetoUsuario[0][0]
+        }
+
 # ---------------------------------------- ENTREGADORES ----------------------------------------
 
 @api_entregas.get("entregadores/options")
@@ -1066,7 +1091,7 @@ def delete_modal_agendados( request ):
                 DELETE FROM ek_entregador_pontos
                 WHERE seq_item_entrega = %s
             """,[
-                sequencial_item[0][0]
+                request.GET["sequencial"]
             ])
 
         return {
