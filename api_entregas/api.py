@@ -1,9 +1,53 @@
 from ninja import Router
-from django.db import connection
+from django.db import connection , transaction
 import json
 import traceback
+from pydantic import BaseModel, ValidationError
+from typing import List
 
 api_entregas = Router()
+
+def insertAuditoria( seq_tenant , seq_tenant_user  , aplicacao , tipo_alteracao , dados_adicionais  ):
+    cursor = connection.cursor()
+
+    try:
+
+        observacao = ''
+
+        if tipo_alteracao == 'A':
+            observacao = f"Registro alterado por {seq_tenant_user} através do app {aplicacao}!"
+
+        if tipo_alteracao == 'E':
+            observacao = f"Registro excluido e reaberta por {seq_tenant_user} através do app {aplicacao}!"
+
+        if tipo_alteracao == 'I':
+            observacao = f"Registro inserido por {seq_tenant_user} através do app {aplicacao}!"
+        
+        cursor.execute("""
+            INSERT INTO ek_auditoria(
+                seq_tenant,
+                seq_tenant_user,
+                dt_cadastro,
+                tipo_alteracao,
+                observacao,
+                dados_adicionais 
+            )VALUES(
+                %s,
+                %s,
+                now(),
+                %s,
+                %s,
+                %s
+            )
+        """,[
+            seq_tenant,
+            seq_tenant_user,
+            tipo_alteracao,
+            observacao,
+            dados_adicionais
+        ])
+    except Exception as erro:
+        print("Houve um erro ao executar o script da auditoria!", erro)
 
 # ------------------------------------------- LOGIN -------------------------------------------
 @api_entregas.get("login/")
@@ -14,7 +58,7 @@ def get_login( request ):
         SELECT json_agg(x.*)
         FROM (
             SELECT 
-                ek_tenant.seq_tenant , login , type_user , seq_entregador , nome_empresa
+                ek_tenant.seq_tenant , ek_tenant_user.seq_tenant_user , login , type_user , seq_entregador , nome_empresa
             FROM ek_tenant_user INNER JOIN ek_tenant 
                 ON ek_tenant_user.seq_tenant = ek_tenant.seq_tenant
             WHERE login = %s AND password = %s
@@ -90,6 +134,9 @@ def post_entregadores( request ):
     entregadores_unicode = request.body.decode('utf-8')
     entregadores = json.loads(entregadores_unicode)['body']
 
+    parametros_unicode = request._body.decode('utf-8')
+    parametros = json.loads(parametros_unicode)['params']
+
     try:
         cursor.execute("""
             INSERT INTO ek_entregador(
@@ -104,6 +151,23 @@ def post_entregadores( request ):
             entregadores["dbedContato"]
         ])
         codigo_entregador = cursor.fetchall()
+        insertAuditoria(parametros.get("seq_tenant") , parametros.get("seq_tenant_user"),'web','I' , f'Entregador {codigo_entregador[0][0]} cadastrado!')
+
+        cursor.execute("""
+            INSERT INTO ek_tenant_user(
+                seq_tenant, login , password , type_user , dt_cadastro , seq_entregador
+            )VALUES(
+                %s , %s , %s , '3' , now(), %s
+            ) returning seq_tenant_user
+        """,[
+            parametros.get("seq_tenant"),
+            entregadores["dbedUsuario"],
+            entregadores["dbedSenha"],
+            codigo_entregador[0][0]
+        ])
+        codigo_usuario = cursor.fetchall()[0][0]
+
+        insertAuditoria(parametros.get("seq_tenant") , parametros.get("seq_tenant_user"),'web','I' , f'Usuário {codigo_usuario} cadastrado!')
 
         return {
             "Status": 200,
@@ -122,8 +186,6 @@ def post_entregadores( request ):
 def get_entregador( request ):
     cursor = connection.cursor()
 
-    print( request.GET["codigo_entregador"] )
-
     cursor.execute("""
         SELECT json_agg(x.*)
         FROM (
@@ -138,8 +200,6 @@ def get_entregador( request ):
         request.GET["codigo_entregador"]
     ])
     objetoEntregador = cursor.fetchall()
-
-    print(objetoEntregador)
 
     if objetoEntregador:
         return {
@@ -179,6 +239,8 @@ def put_entregadores( request ):
         ])
         codigo_entregador = cursor.fetchall()
 
+        insertAuditoria(parametros.get("seq_tenant") , parametros.get("seq_tenant_user") , 'web','A' , f'Entregador {codigo_entregador[0][0]} atualizado!')
+
         if codigo_entregador:
             return {
                 "Status": 200,
@@ -192,7 +254,41 @@ def put_entregadores( request ):
                 "causa": "Houve um erro ao atualizar o entregador!"
             }
         }
-    
+
+@api_entregas.delete("entregadores/")
+def delete_entregador( request ):
+    cursor = connection.cursor()
+
+    try:
+        cursor.execute("""
+            DELETE FROM ek_entregador WHERE seq_entregador = %s RETURNING nome_entregador
+        """,[
+            request.GET["sequencial_entregador"]
+        ])
+        nome_entregador = cursor.fetchall()[0][0]
+
+        insertAuditoria(request.GET["seq_tenant"] , request.GET["seq_tenant_user"] , 'web','E' , f'Entregador {nome_entregador} excluido!')
+
+        return {
+            "Status": 200,
+            "Mensagem": "Entregador excluido com sucesso!"
+        }
+    except Exception as Error:
+        if "is still referenced from table" in str(Error):
+            return {
+                "Status": 400,
+                "Erro": {
+                    "causa": "Entregador já referenciado em outra tabela!"
+                }
+            }
+
+        traceback.print_exc()
+        return {
+            "Status": 400,
+            "Erro": {
+                "causa": "Hovue um erro ao excluir o entregador!"
+            }
+        }
 
 # ---------------------------------------- VEICULOS ----------------------------------------
 
@@ -225,6 +321,9 @@ def post_veiculo( request ):
 
     entregadores_unicode = request.body.decode('utf-8')
     entregadores = json.loads(entregadores_unicode)['body']
+    
+    parametros_unicode = request._body.decode('utf-8')
+    parametros = json.loads(parametros_unicode)['params']
 
     try:
         cursor.execute("""
@@ -237,6 +336,8 @@ def post_veiculo( request ):
             entregadores["dbedPlaca"]
         ])
         codigo_veiculo = cursor.fetchall()
+
+        insertAuditoria(parametros.get("seq_tenant") , parametros.get("seq_tenant_user") , 'web','I' , f'Veiculo {entregadores["dbedNome"]} cadastrado!')
 
         if codigo_veiculo:
             return {
@@ -331,6 +432,8 @@ def put_veiculo( request ):
         ])
         codigo_veiculo = cursor.fetchall()
 
+        insertAuditoria(parametros.get("seq_tenant") , parametros.get("seq_tenant_user") , 'web','A' , f'Veiculo {veiculo["dbedNome"]} alterado!')
+
         if codigo_veiculo:
             return {
                 "Status": 200,
@@ -342,6 +445,41 @@ def put_veiculo( request ):
             "Status": 400,
             "Erro": {
                 "causa": "Houve um erro ao atualizar o veículo!"
+            }
+        }
+
+@api_entregas.delete("veiculos/")
+def delete_veiculo( request ):
+    cursor = connection.cursor()
+
+    try:
+        cursor.execute("""
+            DELETE FROM ek_veiculo WHERE seq_veiculo = %s RETURNING nome_veiculo
+        """,[
+            request.GET["sequencial_veiculo"]
+        ])
+        nome_veiculo = cursor.fetchall()[0][0]
+
+        insertAuditoria(request.GET["seq_tenant"] , request.GET["seq_tenant_user"] , 'web','E' , f'Veiculo {nome_veiculo} excluido!')
+
+        return {
+            "Status": 200,
+            "Mensagem": "Veículo excluido com sucesso!"
+        }
+    except Exception as Error:
+        if "is still referenced from table" in str(Error):
+            return {
+                "Status": 400,
+                "Erro": {
+                    "causa": "Veículo já referenciado em outra tabela!"
+                }
+            }
+
+        traceback.print_exc()
+        return {
+            "Status": 400,
+            "Erro": {
+                "causa": "Hovue um erro ao excluir o veículo!"
             }
         }
     
@@ -375,7 +513,7 @@ def get_entregas( request ):
         '%' + request.GET["query_cliente"] + '%', '%' + request.GET["query_cliente"] + '%', 
     ])
     paginacao = cursor.fetchall()
-
+    print("Status:" , request.GET["query_status"])
     cursor.execute("""
         SELECT
             json_agg(x.*)
@@ -439,6 +577,8 @@ def gera_troca( request ):
     entrega_unicode = request.body.decode('utf-8')
     entrega = json.loads(entrega_unicode)['body']
 
+    parametros_unicode = request._body.decode('utf-8')
+    parametros = json.loads(parametros_unicode)['params']
 
     try:
         cursor.execute("""
@@ -460,6 +600,8 @@ def gera_troca( request ):
         ])
         sequencial_entrega = cursor.fetchall()
 
+        insertAuditoria(parametros.get("seq_tenant") , parametros.get("seq_tenant_user") , 'web','I' , f'Troca {sequencial_entrega[0][0]} gerada!')
+
         if sequencial_entrega:
             
             try:
@@ -480,6 +622,7 @@ def gera_troca( request ):
                     sequencial_entrega[0][0],
                     entrega.get("sequencial_entrega")
                 ])
+                insertAuditoria(parametros.get("seq_tenant") , parametros.get("seq_tenant_user") , 'web','I' , f'Itens da troca {sequencial_entrega[0][0]} gerados!')
             except:
                 traceback.print_exc()
                 return {
@@ -504,12 +647,14 @@ def gera_troca( request ):
         }
 
 @api_entregas.post("entregas/gera-recolhimento")
-def gera_troca( request ):
+def gera_recolhimento( request ):
     cursor = connection.cursor()
 
     entrega_unicode = request.body.decode('utf-8')
     entrega = json.loads(entrega_unicode)['body']
 
+    parametros_unicode = request._body.decode('utf-8')
+    parametros = json.loads(parametros_unicode)['params']
 
     try:
         cursor.execute("""
@@ -531,6 +676,8 @@ def gera_troca( request ):
         ])
         sequencial_entrega = cursor.fetchall()
 
+        insertAuditoria(parametros.get("seq_tenant") , parametros.get("seq_tenant_user") , 'web','I' , f'Recolhimento {sequencial_entrega[0][0]} gerado!')
+
         if sequencial_entrega:
             
             try:
@@ -551,6 +698,7 @@ def gera_troca( request ):
                     sequencial_entrega[0][0],
                     entrega.get("sequencial_entrega")
                 ])
+                insertAuditoria(parametros.get("seq_tenant") , parametros.get("seq_tenant_user") , 'web','I' , f'Itens do recolhimento {sequencial_entrega[0][0]} gerados!')
             except:
                 traceback.print_exc()
                 return {
@@ -580,11 +728,43 @@ def delete_entrega( request ):
 
     try:
         cursor.execute("""
+            DELETE FROM ek_entregador_pontos WHERE seq_item_entrega IN
+                (SELECT seq_item_entrega FROM ek_item_entrega WHERE seq_entrega = %s)
+        """,[
+            request.GET["sequencial_entrega"]
+        ])
+        insertAuditoria(request.GET["seq_tenant"] , request.GET["seq_tenant_user"] , 'web','E' , f'Entrega {request.GET["sequencial_entrega"]} excluida!')
+    except:
+        return {
+            "Status": 400,
+            "Erro": {
+                "causa": "Houve um erro ao excluir os pontos do entregador!"
+            }
+        }
+
+    try:
+        cursor.execute("""
+            DELETE FROM ek_entregador_item_entrega WHERE seq_item_entrega IN
+            (SELECT seq_item_entrega FROM ek_item_entrega WHERE seq_entrega = %s)
+        """,[
+            request.GET["sequencial_entrega"]
+        ])
+    except:
+        return {
+            "Status": 400,
+            "Erro": {
+                "causa": "Houve um erro ao excluir a vinculação dos entregadores"
+            }
+        }
+
+    try:
+        cursor.execute("""
             DELETE FROM ek_item_entrega WHERE seq_entrega = %s
         """,[
             request.GET["sequencial_entrega"]
         ])
     except:
+        traceback.print_exc()
         return {
             "Status": 400,
             "Erro": {
@@ -599,6 +779,7 @@ def delete_entrega( request ):
             request.GET["sequencial_entrega"]
         ])
     except:
+        traceback.print_exc()
         return {
             "Status": 400,
             "Erro": {
@@ -756,7 +937,6 @@ def post_entregas_modal( request ):
                 }
             }
 
-
         for campo in camposEntregadores:
 
             campoCompleto = campo
@@ -772,9 +952,10 @@ def post_entregas_modal( request ):
                             seq_tenant,
                             seq_entregador,
                             seq_item_entrega,
-                            dt_cadastro
+                            dt_cadastro,
+                            status
                         ) VALUES (
-                            %s, %s, %s , now()
+                            %s, %s, %s , now() , 'PENDENTE'
                         ) RETURNING seq_entregador_item_entrega
                     """,[
                         '1',
@@ -783,6 +964,8 @@ def post_entregas_modal( request ):
                     ])
                     sequencial = cursor.fetchall()[0][0]
                     sequencialEntregadorItemEntrega = sequencial
+                    
+                    insertAuditoria(parametros.get("seq_tenant") , parametros.get("seq_tenant_user") , 'web','I' , f'Entregador vinculado ao seq_item_entrega {numeroRowEntregador}!')
 
                 except:
                     traceback.print_exc()
@@ -798,10 +981,12 @@ def post_entregas_modal( request ):
                         UPDATE ek_item_entrega
                         SET 
                             seq_veiculo = %s,
-                            status_entrega_item = 'A'
+                            status_entrega_item = 'P',
+                            data_entrega = %s
                         WHERE seq_item_entrega = %s
                     """,[
                         formulario.get('dbedVeiculo'),
+                        formulario.get('dbedDataEntrega'),
                         numeroRowEntregador
                     ])
                 except:
@@ -830,6 +1015,8 @@ def post_entregas_modal( request ):
                         None if formulario.get(f"dbedPontosItem{numeroRowEntregador}") == '' else formulario.get(f"dbedPontosItem{numeroRowEntregador}"),
                         sequencialEntregadorItemEntrega
                     ])
+                    
+                    insertAuditoria(parametros.get("seq_tenant") , parametros.get("seq_tenant_user") , 'web','I' , f'Pontos do entregador gerados e vinculados ao seq_item_entrega {numeroRowEntregador}!')
                 except:
                     traceback.print_exc()
                     return {
@@ -899,12 +1086,20 @@ def delete_item_entregas( request ):
 
     try:
         cursor.execute("""
+            SELECT status_entrega_item FROM ek_item_entrega
+            WHERE ek_item_entrega.seq_item_entrega = %s               
+        """)
+        old_status = cursor.fetchall()[0][0]
+
+        cursor.execute("""
             UPDATE ek_item_entrega
             SET status_entrega_item = 'C' 
             WHERE ek_item_entrega.seq_item_entrega = %s
         """,[
             request.GET["sequencial"]
         ])
+        
+        insertAuditoria(request.GET["seq_tenant"] , request.GET["seq_tenant_user"] , 'web','A' , f'Item {request.GET["sequencial"]} da Entrega alterado de { old_status } para C!')
 
         cursor.execute("""
             SELECT seq_entrega FROM ek_item_entrega WHERE ek_item_entrega.seq_item_entrega = %s
@@ -982,7 +1177,7 @@ def put_modal_agendados( request ):
             UPDATE 
                 ek_entregador_item_entrega
             SET
-                seq_entregador = %s                
+                seq_entregador = %s
             WHERE
                 ek_entregador_item_entrega.seq_entregador_item_entrega = %s
         """,[
@@ -1064,7 +1259,8 @@ def delete_modal_agendados( request ):
                     THEN 'FINALIZADO' else 'EM ABERTO' 
                 END ) as status
         """,[
-            sequencial_entrega[0][0] , sequencial_entrega[0][0]
+            sequencial_entrega[0][0] , 
+            sequencial_entrega[0][0]
         ])
         status_entrega = cursor.fetchall()
 
@@ -1077,6 +1273,9 @@ def delete_modal_agendados( request ):
                 status_entrega[0][0],
                 sequencial_entrega[0][0]
             ])
+
+            
+            insertAuditoria(request.GET["seq_tenant"] , request.GET["seq_tenant_user"] , 'web','I' , f'Entregador desvinculado do item { sequencial_item[0][0] }')
         except:
             traceback.print_exc()
             return {
@@ -1132,7 +1331,7 @@ def getConsultaAgendamentos( request ):
                     (%s = '' OR ek_entregador_item_entrega.seq_entregador::varchar = %s) AND
                     (%s = '' OR ek_item_entrega.data_entrega::date::varchar = %s) AND
                     (%s = '' OR ek_entrega.seq_pedido_cli::varchar = %s) AND
-                    (%s = '' OR ek_item_entrega.status_entrega_item::varchar = %s)
+                    (%s = '' OR ek_entregador_item_entrega.status::varchar = %s)
                 )
         ) as x
     """,[
@@ -1158,16 +1357,7 @@ def getConsultaAgendamentos( request ):
                 COALESCE(ek_entregador.nome_entregador,'N/A') as nome_entregador,
                 COALESCE(ek_veiculo.nome_veiculo,'N/A') as nome_veiculo,
                 ek_entrega.observacao,
-                (
-                    CASE    WHEN ek_item_entrega.status_entrega_item = 'A' THEN 'AGENDADO'
-                            WHEN ek_item_entrega.status_entrega_item = 'F' THEN 'FINALIZADO'
-                            WHEN ek_item_entrega.status_entrega_item = 'R' THEN 'EM ROTA'
-                            WHEN ek_item_entrega.status_entrega_item = 'C' THEN 'CANCELADO'
-                            WHEN ek_item_entrega.status_entrega_item = 'AD' THEN 'ADIADO'
-                            WHEN ek_item_entrega.status_entrega_item = 'P' THEN 'PENDENTE'
-                            ELSE 'OUTROS' 
-                    END 
-                ) as status,
+                ek_entregador_item_entrega.status as status,
                 (   CASE WHEN coalesce(ek_entrega.tipo_operacao,'E') = 'E' THEN 'ENTREGA'
                         WHEN coalesce(ek_entrega.tipo_operacao,'E') = 'T' THEN 'TROCA'
                         WHEN coalesce(ek_entrega.tipo_operacao,'E') = 'R' THEN 'RECOLHIMENTO'
@@ -1186,7 +1376,7 @@ def getConsultaAgendamentos( request ):
                     (%s = '' OR ek_entregador_item_entrega.seq_entregador::varchar = %s) AND
                     (%s = '' OR ek_item_entrega.data_entrega::date::varchar = %s) AND
                     (%s = '' OR ek_entrega.seq_pedido_cli::varchar = %s) AND
-                    (%s = '' OR ek_item_entrega.status_entrega_item::varchar = %s)
+                    (%s = '' OR ek_entregador_item_entrega.status::varchar = %s)
                 )
             ORDER BY ek_entrega.seq_pedido_cli DESC
             offset %s limit 10
@@ -1303,3 +1493,393 @@ def getEntregaModal( request ):
             }
         }
 
+
+
+# ----------------------------------- Mobile -----------------------------------
+
+#----------------------------------- Method GET --------------------------------
+
+@api_entregas.get("mobile/entregas/")
+def get_entregas( request ):
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        SELECT json_agg(x.*)
+        FROM(
+            SELECT
+                ek_entrega.seq_entrega as doc_entrega,
+                ek_entrega.nome_pessoa as cliente,
+                ( ek_entrega.endereco || ', ' || ek_entrega.numero_endereco || ', ' || ek_entrega.bairro_endereco ||  '/' || ek_entrega.cidade_endereco ) as endereco,
+                coalesce( ek_entrega.contato_pessoa , 'S/N') as telefone,
+                (
+                    SELECT json_agg(y.*)
+                    FROM (
+                        SELECT 
+                            ek_entregador_item_entrega.seq_item_entrega,
+                            (ek_item_entrega.cod_produto || ek_item_entrega.descricao_produto) as produto,
+                            (ek_item_entrega.quantidade_produto) as quantidade,
+                            TO_CHAR( data_entrega::date, 'DD/MM/YYYY') as data_entrega
+                        FROM
+                            ek_entregador_item_entrega INNER JOIN ek_item_entrega
+                                ON ek_entregador_item_entrega.seq_item_entrega = ek_item_entrega.seq_item_entrega
+                        WHERE 
+                            ek_item_entrega.seq_entrega = ek_entrega.seq_entrega
+                            AND ek_entregador_item_entrega.status = %s
+                            AND ek_entregador_item_entrega.seq_entregador = %s
+                   ) as y
+                ) as itens
+            FROM 
+                ek_entregador_item_entrega INNER JOIN ek_item_entrega
+                    ON ek_entregador_item_entrega.seq_item_entrega = ek_item_entrega.seq_item_entrega
+                INNER JOIN ek_entrega
+                    ON ek_entrega.seq_entrega = ek_item_entrega.seq_entrega
+            WHERE ek_entregador_item_entrega.seq_entregador = %s
+                AND ( ek_entrega.seq_entrega::varchar = %s OR upper(ek_entrega.nome_pessoa) LIKE UPPER( %s ))
+                AND exists ( select * from 
+	 							ek_entregador_item_entrega INNER JOIN ek_item_entrega 
+	 								ON ek_entregador_item_entrega.seq_item_entrega = ek_item_entrega.seq_item_entrega 
+	 									WHERE 
+                                            status = %s 
+                                            AND ek_item_entrega.seq_entrega = ek_entrega.seq_entrega
+                                            AND ek_entregador_item_entrega.seq_entregador = %s
+                                        ) 
+			GROUP BY 
+				ek_entrega.seq_entrega,
+                ek_entrega.nome_pessoa,
+                ek_entrega.endereco,
+				ek_entrega.numero_endereco,
+				ek_entrega.bairro_endereco,
+				ek_entrega.cidade_endereco,
+                ek_entrega.contato_pessoa
+        ) as x
+    """,[
+        request.GET["status"],
+        request.GET["sequencial_entregador"],
+        request.GET["sequencial_entregador"],
+        request.GET["filtro"], '%' + request.GET["filtro"] + '%',
+        request.GET["status"],
+        request.GET["sequencial_entregador"],
+    ])
+    objetoEntregas = cursor.fetchall()
+
+    if objetoEntregas:
+        return{
+            "Status": 200,
+            "Entregas": objetoEntregas[0][0]
+        }
+    else:
+        return []
+
+@api_entregas.put("mobile/entregas")
+def put_entregas_status( request ):
+    cursor = connection.cursor()
+
+    entrega_unicode = request.body.decode('utf-8')
+    entrega = json.loads(entrega_unicode)['body']
+
+    parametros_unicode = request._body.decode('utf-8')
+    parametros = json.loads(parametros_unicode)['params']
+
+    status = [ 'PENDENTE' , 'AGENDADO' , 'FINALIZADO' , 'CANCELADO' ]
+    filtroStatus = status[ status.index( parametros.get("new_status") ) - 1 ]
+
+    try:
+        cursor.execute("""
+            UPDATE ek_entregador_item_entrega 
+            SET status = %s
+            WHERE seq_item_entrega 
+                IN ( select seq_item_entrega from ek_item_entrega where seq_entrega IN %s )
+            AND ek_entregador_item_entrega.status = %s
+            AND seq_entregador = %s
+        """,[
+            parametros.get("new_status"),
+            tuple(entrega),
+            filtroStatus,
+            parametros.get("sequencial_entregador"),
+        ])
+
+        for entrega in entrega:
+            insertAuditoria(parametros.get("seq_tenant") , parametros.get("seq_tenant_user") ,'mobile','A' , f'Entrega {entrega} alterada de { filtroStatus } para { parametros.get("new_status")}')
+
+        return {
+            "Status": 200,
+            "Mensagem": "Itens atualizados com sucesso!"
+        }
+
+    except:
+        traceback.print_exc()
+        return {
+            "Status": 400,
+            "Erro": {
+                "causa": "Houve um erro ao atualizar as entregas!"
+            }
+        }
+
+@api_entregas.put("mobile/entregas/cancelar")
+def put_cancelar_entregas( request ):
+    cursor = connection.cursor()
+
+    entrega_unicode = request.body.decode('utf-8')
+    entrega = json.loads(entrega_unicode)['body']
+
+    parametros_unicode = request._body.decode('utf-8')
+    parametros = json.loads(parametros_unicode)['params']
+
+    try:
+        cursor.execute("""
+            SELECT distinct status FROM ek_entregador_item_entrega WHERE seq_item_entrega 
+                IN ( select seq_item_entrega from ek_item_entrega where seq_entrega IN %s )
+        """,[
+            tuple(entrega)
+        ])
+        old_status = cursor.fetchall()[0][0]
+
+        cursor.execute("""
+            DELETE FROM ek_entregador_item_entrega 
+            WHERE seq_item_entrega 
+                IN ( select seq_item_entrega from ek_item_entrega where seq_entrega IN %s )
+            AND seq_entregador = %s
+        """,[
+            tuple(entrega),
+            parametros.get("sequencial_entregador"),
+        ])
+
+
+        cursor.execute("""
+            UPDATE ek_entrega SET status_entrega = 'EM ABERTO' WHERE seq_entrega IN %s
+        """,[
+            tuple( entrega )
+        ])
+
+        for entrega in entrega:
+            insertAuditoria(parametros.get("seq_tenant") , parametros.get("seq_tenant_user") ,'mobile','E' , f'Entrega { entrega } alterada de { old_status } para ABERTA')
+
+        return {
+            "Status": 200,
+            "Mensagem": "Itens cancelados com sucesso!"
+        }
+
+    except:
+        traceback.print_exc()
+        return {
+            "Status": 400,
+            "Erro": {
+                "causa": "Houve um erro ao atualizar as entregas!"
+            }
+        }
+
+@api_entregas.get("mobile/entregador")
+def get_entregador( request ):
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        SELECT json_agg(x.*)
+        FROM (
+            SELECT 
+                nome_entregador,
+                email_entregador,
+                fone_entregador
+            FROM ek_entregador
+            WHERE ek_entregador.seq_entregador = %s
+        ) as x
+    """,[
+        request.GET["sequencial_entregador"]
+    ])
+    objetoEntregador = cursor.fetchall()
+
+    if objetoEntregador:
+        return {
+            "Status": 200,
+            "Entregador": objetoEntregador[0][0]
+        }
+    else:
+        return{
+            "Status": 400,
+            "Erro": {
+                "causa": f'Não foi possivel localizar o entregador { request.GET["sequencial_entregador"] }. Favor entrar em contato com a equipe de suporte EkoOS.'
+            }
+        }
+
+@api_entregas.put("mobile/entregador")
+def put_entregador( request ):
+    cursor = connection.cursor()
+
+    entregador_unicode = request.body.decode('utf-8')
+    entregador = json.loads(entregador_unicode)['body']
+
+    parametros_unicode = request._body.decode('utf-8')
+    parametros = json.loads(parametros_unicode)['params']
+
+    tipo_update = parametros.get("campo_atualizar")
+
+    try:
+        if tipo_update == 'nome':
+            try:
+                cursor.execute("""
+                    UPDATE ek_entregador SET nome_entregador = %s WHERE seq_entregador = %s
+                """,[
+                    entregador.get("nome_entregador"),
+                    parametros.get("sequencial_entregador")
+                ])
+
+                return {"Status": 200 , "Mensagem": "Entregador atualizado com sucesso"}
+
+            except:
+                return {
+                    "Status": 400,
+                    "Erro": {
+                        "causa": "Houve um erro ao atualizar o nome!"
+                    }
+                }
+
+        if tipo_update == 'email':
+            try:
+                cursor.execute("""
+                    UPDATE ek_entregador SET email_entregador = %s WHERE seq_entregador = %s
+                """,[
+                    entregador.get("email_entregador"),
+                    parametros.get("sequencial_entregador")
+                ])
+                return {"Status": 200 , "Mensagem": "Entregador atualizado com sucesso"}
+            except:
+                return {
+                    "Status": 400,
+                    "Erro": {
+                        "causa": "Houve um erro ao atualizar o nome!"
+                    }
+                }
+
+        if tipo_update == 'telefone':
+            try:
+                cursor.execute("""
+                    UPDATE ek_entregador SET fone_entregador = %s WHERE seq_entregador = %s
+                """,[
+                    entregador.get("fone_entregador"),
+                    parametros.get("sequencial_entregador")
+                ])
+                return {"Status": 200 , "Mensagem": "Entregador atualizado com sucesso"}
+            except:
+                return {
+                    "Status": 400,
+                    "Erro": {
+                        "causa": "Houve um erro ao atualizar o nome!"
+                    }
+                }
+
+    except:
+        traceback.print_exc()
+        return {
+            "Status": 400,
+            "Erro": {
+                "causa": "Houve um erro ao atualizar as entregas!"
+            }
+        }
+    
+class ProdutoSchema(BaseModel):
+    seq_item_pedido_cli: int
+    cod_produto: str
+    descricao_produto: str
+    quantidade_produto: float
+    observacao_item: str
+
+class JSONSchema( BaseModel ):
+    seq_tenant: int
+    seq_pedido_cli: str
+    cod_pessoa: int
+    nome_pessoa: str
+    cnpj_cpf: str
+    endereco: str
+    numero_endereco: str
+    bairro_endereco: str
+    cep_endereco: str
+    cidade_endereco: str
+    contato_pessoa: str
+    tipo_operacao: str
+    observacao: str
+    produtos: List[ ProdutoSchema ]
+
+@api_entregas.post("externo/entregas/")
+def get_entregas_externo(request):
+    cursor = connection.cursor()
+
+    try:
+        entregas_unicode = request.body.decode("utf-8")
+        entregas = json.loads(entregas_unicode)["body"]
+
+        with transaction.atomic():  # Inicia a transação atômica
+            for entrega in entregas:
+                try:
+                    # Validação do JSON
+                    validaJson = JSONSchema(**entrega)
+
+                    # Inserção na tabela `ek_entrega`
+                    cursor.execute(
+                        """
+                        INSERT INTO public.ek_entrega(
+                            seq_tenant, seq_pedido_cli, cod_pessoa, nome_pessoa, cnpj_cpf, 
+                            endereco, numero_endereco, bairro_endereco, cep_endereco, cidade_endereco, 
+                            contato_pessoa, tipo_operacao, observacao, status_entrega, dt_cadastro
+                        ) VALUES (
+                            %s,%s,%s,%s,%s,
+                            %s,%s,%s,%s,%s,
+                            %s,%s,%s,'EM ABERTO',now()
+                        ) returning seq_entrega;
+                        """,
+                        [
+                            entrega.get("seq_tenant"),
+                            entrega.get("seq_pedido_cli"),
+                            entrega.get("cod_pessoa"),
+                            entrega.get("nome_pessoa"),
+                            entrega.get("cnpj_cpf"),
+                            entrega.get("endereco"),
+                            entrega.get("numero_endereco"),
+                            entrega.get("bairro_endereco"),
+                            entrega.get("cep_endereco"),
+                            entrega.get("cidade_endereco"),
+                            entrega.get("contato_pessoa"),
+                            entrega.get("tipo_operacao"),
+                            entrega.get("observacao"),
+                        ],
+                    )
+
+                    sequencial_entrega = cursor.fetchone()[0]  # Corrigido para usar `fetchone()`
+
+                    # Inserção dos produtos na tabela `ek_item_entrega`
+                    for item in entrega.get("produtos", []):
+                        cursor.execute(
+                            """
+                            INSERT INTO public.ek_item_entrega(
+                                seq_tenant, seq_entrega, seq_item_pedido_cli, cod_produto, 
+                                descricao_produto, quantidade_produto, observacao_item, status_entrega_item, dt_cadastro
+                            ) VALUES (
+                                %s,%s,%s,%s,%s,
+                                %s,%s,'A',now()
+                            );
+                            """,
+                            [
+                                entrega.get("seq_tenant"),
+                                sequencial_entrega,
+                                item.get("seq_item_pedido_cli"),
+                                item.get("cod_produto"),
+                                item.get("descricao_produto"),
+                                item.get("quantidade_produto"),
+                                item.get("observacao_item"),
+                            ],
+                        )
+
+                except Exception as error:
+                    traceback.print_exc()  # Exibe o erro no console para debug
+                    raise Exception(f"Erro ao inserir entrega: {str(error)}")  # Força o rollback
+
+    except Exception as error:
+        return {
+            "Status": 400,
+            "Erro": {
+                "causa": str(error)
+            }
+        }
+
+    return {
+        "Status": 200,
+        "Mensagem": "Entregas inseridas com sucesso!"
+    }
