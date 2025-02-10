@@ -80,10 +80,10 @@ WSGI_APPLICATION = 'core.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'ekoos_entregador',
+        'NAME': 'postgres',
         'USER': 'postgres',
         'PASSWORD': 'economia11@#',
-        'HOST': '192.168.15.92',
+        'HOST': 'db.nbyotiokydozvnrnnqee.supabase.co',
         'PORT': '5432',
     }
 }
