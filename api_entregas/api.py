@@ -513,7 +513,7 @@ def get_entregas( request ):
         '%' + request.GET["query_cliente"] + '%', '%' + request.GET["query_cliente"] + '%', 
     ])
     paginacao = cursor.fetchall()
-    print("Status:" , request.GET["query_status"])
+    
     cursor.execute("""
         SELECT
             json_agg(x.*)
