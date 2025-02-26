@@ -81,24 +81,13 @@ WSGI_APPLICATION = 'core.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'postgres',
-        'USER': 'postgres.nbyotiokydozvnrnnqee',
-        'PASSWORD': 'economia11@#',
-        'HOST': 'aws-0-sa-east-1.pooler.supabase.com',
-        'PORT': '6543',
+        'NAME': 'ekoos_entrega',
+        'USER': 'postgres',
+        'PASSWORD': 'economia11',
+        'HOST': 'postgres-ekoos-entrega',
+        'PORT': '5432',
     }
 }
-
-# DATABASES = {
-#     'default': {
-#         'ENGINE': 'django.db.backends.postgresql',
-#         'NAME': 'ekoos_entregador',
-#         'USER': 'postgres',
-#         'PASSWORD': 'postgres',
-#         'HOST': '192.168.15.92',
-#         'PORT': '5432',
-#     }
-# }
 
 # Password validation
 # https://docs.djangoproject.com/en/3.2/ref/settings/#auth-password-validators
